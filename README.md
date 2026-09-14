@@ -12,8 +12,8 @@ already run.
 
 <br>
 
-[![Build](https://github.com/benode-SAS/servor-agent/actions/workflows/build.yml/badge.svg)](https://github.com/benode-SAS/servor-agent/actions/workflows/build.yml)
-[![Release](https://img.shields.io/github/v/release/benode-SAS/servor-agent?label=release&color=06b6d4)](https://github.com/benode-SAS/servor-agent/releases/latest)
+[![Build](https://github.com/Servorapp/servor-agent/actions/workflows/build.yml/badge.svg)](https://github.com/Servorapp/servor-agent/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/Servorapp/servor-agent?label=release&color=06b6d4)](https://github.com/Servorapp/servor-agent/releases/latest)
 [![Licence](https://img.shields.io/badge/licence-Apache--2.0-8b5cf6)](LICENSE)
 [![Bun](https://img.shields.io/badge/bun-1.3-black)](https://bun.sh)
 
@@ -36,7 +36,7 @@ the commands you approve. No port to open, no runtime to install.
 
 The agent is installed for you when you add a server in Servor. By hand: take
 the binary for your platform from the
-[latest release](https://github.com/benode-SAS/servor-agent/releases/latest),
+[latest release](https://github.com/Servorapp/servor-agent/releases/latest),
 put it on `PATH`, write the config file below, run it under systemd.
 
 ## Configuration
@@ -131,8 +131,11 @@ Releases ship `SHA256SUMS` and a signed provenance attestation:
 
 ```sh
 sha256sum servor-agent-linux-x64
-gh attestation verify servor-agent-linux-x64 --repo benode-SAS/servor-agent
+gh attestation verify servor-agent-linux-x64 --repo Servorapp/servor-agent
 ```
+
+Releases up to v1.1.3 were attested under the repository's former name: verify
+them with `--repo benode-SAS/servor-agent`.
 
 You can also rebuild it: `bun build --compile` is deterministic, so on Linux x64
 with the pinned Bun version you get the same bytes as the release. Other builder
