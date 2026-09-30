@@ -13,11 +13,11 @@
   },
   "command-guards.ts": {
     "source": "packages/shared/src/utils/command-guards.ts",
-    "sha256": "7048d2d29ce097705511ed8b2ac445f4a12d185704a52ebf6589ced61a06a6f5"
+    "sha256": "7f97acad449a772969afa64222ceafdb98d38769d20689faf359221270ba1812"
   },
   "command-blacklist.ts": {
     "source": "packages/shared/src/constants/command-blacklist.ts",
-    "sha256": "972d5b78b8de5c0b6f56db9cbc388b223b61c770cc54a39433f9c86533f109e5"
+    "sha256": "aadccae475ad9b9f887fcae58aa9a456df63f8673f4f906e2e0969c44347a8aa"
   },
   "agent-hmac.ts": {
     "source": "packages/shared/src/crypto/agent-hmac.ts",

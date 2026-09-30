@@ -7,7 +7,13 @@
 // on the control plane is worse than no guard.
 
 export const COMMAND_BLACKLIST_PATTERNS: { pattern: RegExp; reason: string }[] = [
-  { pattern: /\brm\s+(-[a-z]*r[a-z]*f?|--recursive|--force)\s+\/(\s|$)/i, reason: 'rm -rf /' },
+  // The root path can end on any shell metacharacter, not just a space or the
+  // end of the line: `rm -rf /)` inside a substitution, `rm -rf /;` before the
+  // next command. Requiring whitespace let both through.
+  {
+    pattern: /\brm\s+(-[a-z]*r[a-z]*f?|--recursive|--force)\s+\/(\s|$|[);&|'"`])/i,
+    reason: 'rm -rf /',
+  },
   {
     pattern: /\brm\s+(-[a-z]*[rf][a-z]*\s+){0,}--no-preserve-root\b/i,
     reason: 'rm --no-preserve-root',
@@ -17,7 +23,10 @@ export const COMMAND_BLACKLIST_PATTERNS: { pattern: RegExp; reason: string }[] =
     pattern: /\bmkfs(\.[a-z0-9]+)?\s+\/dev\/(sd|nvme|hd|vd|xvd|mmcblk)/i,
     reason: 'mkfs on raw device',
   },
-  { pattern: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, reason: 'fork bomb' },
+  // The whitespace is free everywhere, including between the name and its
+  // `()`: `: (){ :|:& };:` is the same bomb, and it used to reach the agent
+  // because the chain rule — not this pattern — happened to stop it.
+  { pattern: /:\s*\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, reason: 'fork bomb' },
   // No \b before the redirect: a word boundary cannot exist between a space and
   // `>`, so `\b>` only ever matched `x>/etc/passwd` — the spaced form everyone
   // actually types walked straight through.
