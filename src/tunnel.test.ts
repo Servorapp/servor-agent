@@ -712,7 +712,27 @@ describe('flap breaker', () => {
     }
   });
 
-  test('past the hard limit it stops reconnecting entirely', () => {
+  test('past the hard limit it pauses for half an hour instead of for ever', () => {
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { socket } = open();
+      let last = 0;
+      for (let i = 0; i < 20; i++) {
+        flapOnce(socket);
+        last = scheduled[scheduled.length - 1]?.ms ?? 0;
+        fire();
+      }
+      // Giving up for ever turned a duplicate-agent guard into a permanent
+      // outage with no way back but a human: the 20th close now arms one long
+      // retry rather than nothing at all.
+      expect(last).toBe(30 * 60_000);
+      expect(errors.mock.calls.some((c) => String(c[0]).includes('pausing reconnects'))).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  test('the pause starts from a clean counter, so one more flap does not re-trip it', () => {
     const errors = spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       const { socket } = open();
@@ -720,12 +740,10 @@ describe('flap breaker', () => {
         flapOnce(socket);
         fire();
       }
-      // One socket for the initial dial and one per reconnect (closes 1..19);
-      // the 20th close scheduled none, so no further socket is ever opened.
-      expect(sockets.length).toBe(20);
-      expect(errors.mock.calls.some((c) => String(c[0]).includes('stopping reconnects'))).toBe(
-        true,
-      );
+      flapOnce(socket);
+      // Back to the fast backoff: the half-hour pause bought a fresh start, it
+      // did not leave the breaker latched.
+      expect(scheduled[scheduled.length - 1]?.ms).toBe(1000);
     } finally {
       errors.mockRestore();
     }
@@ -827,6 +845,125 @@ describe('heartbeat keeps the tunnel from silently dying', () => {
       expect(socket().readyState).toBe(3); // closed → onclose schedules reconnect
     } finally {
       now.mockRestore();
+    }
+  });
+
+  test('a close that never completes still reconnects', () => {
+    // The incident this guards: on a half-open socket — peer gone, no FIN
+    // coming — `close()` has nothing to complete against and `onclose` may never
+    // fire. The heartbeat used to log, stop its own chain and return, leaving
+    // the tunnel with `online` true, no timer pending and no reconnect armed:
+    // dead, convinced it was alive, until someone restarted the service.
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    const now = spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      const { socket } = online();
+      const live = socket();
+      live.close = () => {
+        live.readyState = 2; // CLOSING, and it stays there: no close event
+      };
+      const before = sockets.length;
+
+      now.mockReturnValue(1_000_000 + 61_000);
+      fire(25_000);
+      fire(); // the reconnect the teardown armed
+
+      expect(sockets.length).toBe(before + 1);
+    } finally {
+      now.mockRestore();
+      errors.mockRestore();
+    }
+  });
+
+  test('a close from the socket we gave up on does not tear down its replacement', () => {
+    // The close event can land long after the heartbeat declared the socket
+    // dead and a fresh one came up. Unstamped, that teardown would fire against
+    // the healthy connection — turning one outage into a loop of them.
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    const now = spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      const { socket } = online();
+      const stale = socket();
+      let staleClose: (() => void) | null = null;
+      stale.close = () => {
+        stale.readyState = 3;
+        staleClose = stale.onclose;
+      };
+
+      now.mockReturnValue(1_000_000 + 61_000);
+      fire(25_000); // heartbeat gives up on `stale`
+      fire(); // reconnect: a new socket is dialled
+      const fresh = socket();
+      fresh.accept();
+      fresh.deliver({ type: 'init.ok' });
+      const armed = scheduled.length;
+
+      (staleClose as unknown as () => void)?.(); // the old close finally lands
+
+      expect(fresh.readyState).toBe(1); // still open
+      expect(scheduled.length).toBe(armed); // and nothing new armed
+    } finally {
+      now.mockRestore();
+      errors.mockRestore();
+    }
+  });
+
+  test('a late close event does not arm a second reconnect', () => {
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    const now = spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      const { socket } = online();
+      const live = socket();
+      let closeEvent: (() => void) | null = null;
+      live.close = () => {
+        live.readyState = 3;
+        closeEvent = live.onclose; // held back, delivered by hand below
+      };
+
+      now.mockReturnValue(1_000_000 + 61_000);
+      fire(25_000);
+      const armed = scheduled.length;
+      (closeEvent as unknown as () => void)?.(); // the close finally lands
+
+      expect(scheduled.length).toBe(armed);
+    } finally {
+      now.mockRestore();
+      errors.mockRestore();
+    }
+  });
+});
+
+describe('an outage nobody can see is the one nobody can fix', () => {
+  test('a connection that never authenticates is reported, not swallowed', () => {
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { socket } = open();
+      socket().close(); // refused before the handshake: the silent case
+      expect(errors.mock.calls.some((c) => String(c[0]).includes('tunnel down for'))).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  test('the control plane reporting no tunnel dials one even when none is open', () => {
+    // The HTTP config poll is the only channel still working in this state, and
+    // returning early here is what left a dead tunnel dead.
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { tunnel, socket } = open();
+      socket().close();
+      fire(); // consume the armed retry: a socket is dialling, nothing is queued
+      const before = sockets.length;
+
+      tunnel.reconnectNow();
+
+      expect(sockets.length).toBe(before + 1);
+      expect(errors.mock.calls.some((c) => String(c[0]).includes('dialling now'))).toBe(true);
+    } finally {
+      errors.mockRestore();
     }
   });
 });

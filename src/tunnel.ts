@@ -254,11 +254,44 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   // past STABLE_MS is healthy and resets the counter.
   let sawInitOk = false;
   let flapCount = 0;
+  // One pending reconnect at a time, and a handle on it: the HTTP rescue below
+  // must be able to tell "a retry is already coming" from "nothing is coming".
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // A tunnel that cannot connect says nothing per attempt — see `noteDown`.
+  let downSince = 0;
+  let lastDownLog = 0;
+  let downAttempts = 0;
   let stableTimer: ReturnType<typeof setTimeout> | null = null;
   const STABLE_MS = 60_000;
+  const DOWN_LOG_INTERVAL_MS = 60_000;
+  // Long, but never "never": a tunnel that gave up is a product that is down,
+  // and nobody is watching this journal to notice.
+  const FLAP_RETRY_MS = 30 * 60_000;
   const FLAP_SOFT_LIMIT = 5;
   const FLAP_HARD_LIMIT = 20;
   const FLAP_COOLDOWN_MS = 5 * 60_000;
+  /**
+   * Report an outage that is otherwise invisible.
+   *
+   * @remarks
+   * A connection that fails before it authenticates is not logged per attempt —
+   * at a retry every ten seconds that would be six lines a minute of the same
+   * sentence. The result, until now, was total silence: an operator reading the
+   * journal after an incident could not tell a tunnel that retried two hundred
+   * times from one that had stopped trying. One line when the outage starts,
+   * then one a minute with the count, costs nothing and answers that question.
+   */
+  const noteDown = () => {
+    const now = Date.now();
+    downAttempts++;
+    if (downSince === 0) downSince = now;
+    if (lastDownLog !== 0 && now - lastDownLog < DOWN_LOG_INTERVAL_MS) return;
+    lastDownLog = now;
+    console.error(
+      `tunnel down for ${Math.round((now - downSince) / 1000)}s — ${downAttempts} attempt(s), still retrying`,
+    );
+  };
+
   const clearStableTimer = () => {
     if (stableTimer) {
       clearTimeout(stableTimer);
@@ -305,12 +338,46 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   // Chained timeout rather than setInterval, like the reconnect below: one
   // pending timer, cleared cleanly on close, and no tick pile-up if a send ever
   // blocks.
+  /**
+   * Everything a dead socket must trigger, exactly once per connection.
+   *
+   * @remarks
+   * `onclose` used to be the only way in, and that was the bug: on a half-open
+   * socket — the peer gone, no FIN coming — `close()` has nothing to complete
+   * against and the event may never fire. The heartbeat would then detect the
+   * death, log it, stop its own chain and return, leaving the tunnel with
+   * `online` still true, no timer pending and no reconnect scheduled: dead, and
+   * convinced it was alive, until someone restarted the service by hand.
+   *
+   * Both paths now land here, and the first one to arrive wins.
+   *
+   * Generation-stamped, because a close event can arrive very late: the socket
+   * the heartbeat gave up on may fire `onclose` long after a fresh one is up,
+   * and an unstamped teardown would then tear down the healthy connection
+   * instead of the dead one.
+   */
+  let generation = 0;
+  let onDead: (() => void) | null = null;
+  const dead = (gen: number) => {
+    if (gen !== generation) return;
+    const run = onDead;
+    onDead = null;
+    run?.();
+  };
+
   const scheduleHeartbeat = () => {
     heartbeat = setTimeout(() => {
       if (!online) return;
       if (Date.now() - lastPong > PONG_DEADLINE_MS) {
         console.error('tunnel heartbeat timed out — reconnecting');
-        ws?.close();
+        // Order matters: ask politely first, then declare it dead ourselves
+        // rather than waiting for a close that may never come.
+        try {
+          ws?.close();
+        } catch {
+          // a socket too broken to close is exactly the case `dead()` covers
+        }
+        dead(generation);
         return;
       }
       lastPingSentAt = Date.now();
@@ -663,7 +730,21 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
    * secret, proving to the control plane which agent this is. It says nothing
    * about what may be executed — that is settled per command, by signature.
    */
+  /** The one place a retry is armed, so the HTTP rescue can tell if one is due. */
+  const scheduleReconnect = (ms: number) => {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, ms);
+  };
+
   const connect = () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    const gen = ++generation;
     ws = new WebSocketImpl(wsUrl);
     ws.onopen = () => {
       const ts = String(Math.floor(Date.now() / 1000));
@@ -691,6 +772,14 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         backoff = 1000;
         lastRefusal = null;
         online = true;
+        if (downSince !== 0) {
+          console.error(
+            `tunnel authenticated — back after ${Math.round((Date.now() - downSince) / 1000)}s and ${downAttempts} attempt(s)`,
+          );
+          downSince = 0;
+          lastDownLog = 0;
+          downAttempts = 0;
+        }
         if (graceTimer) {
           clearTimeout(graceTimer);
           graceTimer = null;
@@ -741,7 +830,9 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
       }
       handle(msg);
     };
-    ws.onclose = () => {
+    // Registered rather than assigned straight to `onclose`: the heartbeat
+    // reaches the same teardown when the close event never arrives.
+    onDead = () => {
       online = false;
       ws = null;
       stopHeartbeat();
@@ -749,6 +840,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
       // A connection that authenticated but died young is a flap; one that never
       // authenticated is an ordinary connection failure (server down, refused),
       // already handled by the exponential backoff below.
+      const wasUp = sawInitOk;
       if (sawInitOk && Date.now() - connectedAt < STABLE_MS) flapCount++;
       sawInitOk = false;
       // Do NOT kill shells: a Servor API restart / network blip must not stop
@@ -771,12 +863,16 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         }, OFFLINE_GRACE_MS);
       }
       if (flapCount >= FLAP_HARD_LIMIT) {
-        // Giving up on reconnecting, not exiting: the process stays alive so
-        // systemd (Restart=always) does not immediately relaunch it into the
-        // same storm. It will retry only on a manual restart or reboot.
+        // Not exiting: the process stays alive so systemd (Restart=always) does
+        // not relaunch it straight into the same storm. But not giving up for
+        // ever either — that turned a duplicate-agent guard into a permanent
+        // outage whenever anything else tripped it, with no way back but a
+        // human. Half an hour later it tries once more, from a clean counter.
         console.error(
-          `tunnel flapped ${flapCount} times — stopping reconnects. Another agent is almost certainly using this server id; reinstall the agent on a single host.`,
+          `tunnel flapped ${flapCount} times — pausing reconnects for ${FLAP_RETRY_MS / 60_000} min. Another agent is almost certainly using this server id; reinstall the agent on a single host.`,
         );
+        flapCount = 0;
+        scheduleReconnect(FLAP_RETRY_MS);
         return;
       }
       if (flapCount >= FLAP_SOFT_LIMIT) {
@@ -785,10 +881,13 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
             `tunnel flapping — backing off for ${FLAP_COOLDOWN_MS / 1000}s (a duplicate agent may share this server id)`,
           );
         }
-        setTimeout(connect, FLAP_COOLDOWN_MS);
+        scheduleReconnect(FLAP_COOLDOWN_MS);
         return;
       }
-      setTimeout(connect, backoff);
+      // Never authenticated: an ordinary outage, silent per attempt but not
+      // silent per minute.
+      if (!wasUp) noteDown();
+      scheduleReconnect(backoff);
       // Ten seconds, not sixty. This is the channel every command travels down,
       // and the minute-long gap it used to reach meant a freshly installed
       // agent stayed unreachable long after whatever refused it had cleared —
@@ -796,6 +895,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
       // handshake; being unreachable costs the product.
       backoff = Math.min(backoff * 2, 10000);
     };
+    ws.onclose = () => dead(gen);
     ws.onerror = () => ws?.close();
   };
 
@@ -807,14 +907,26 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   // 30s floor since the last connect avoids flapping on a response that was
   // computed before a fresh reconnect had registered.
   const reconnectNow = () => {
-    if (!online || !ws) return;
+    // No socket at all: the HTTP channel is the only one still working, and it
+    // has just been told there is no tunnel. If nothing is already due, dial
+    // now — this is the path that used to return here and leave a dead tunnel
+    // dead. The flap counter is cleared on purpose: the control plane reporting
+    // *no* tunnel is the opposite of the duplicate-agent storm it guards.
+    if (!online || !ws) {
+      if (reconnectTimer) return;
+      console.error('control plane reports no tunnel — dialling now');
+      flapCount = 0;
+      connect();
+      return;
+    }
     if (Date.now() - connectedAt < 30_000) return;
     console.error('control plane reports no tunnel — reconnecting');
     try {
       ws.close();
     } catch {
-      // onclose will schedule the reconnect regardless
+      // the teardown below runs regardless
     }
+    dead(generation);
   };
 
   return { isBusy: () => shells.size > 0 || inflightExec > 0, reconnectNow };
