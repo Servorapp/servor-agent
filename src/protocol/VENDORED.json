@@ -30,5 +30,13 @@
   "net-grant.ts": {
     "source": "packages/shared/src/crypto/net-grant.ts",
     "sha256": "badfca22a9b96d8e59f60d396aa70925651d65aa829cac601ab828e3b16f1e96"
+  },
+  "agent-constants.ts": {
+    "source": "packages/shared/src/constants/agent.ts",
+    "sha256": "d1b299a6c9671dd63e6a8c3366c52d4ceacba8e4ae5094b5c3db4c7e5c91bf98"
+  },
+  "redact.ts": {
+    "source": "packages/shared/src/utils/redact.ts",
+    "sha256": "19b84667902233b427544c52420d53254b685478b91ee2963584664e99103158"
   }
 }

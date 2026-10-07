@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { createHmac } from 'node:crypto';
 import { x25519 } from '@noble/curves/ed25519';
-import { AGENT_FACTS_PUSH_DELAY_MS } from '@servor/shared/constants';
 import { clampInterval, createAgent } from './agent';
 import type { CheckDef, CheckResult } from './checks';
 import type { AgentConfig } from './config';
 import { createGrantVerifier } from './grant';
 import type { Payload } from './metrics';
+import { AGENT_FACTS_PUSH_DELAY_MS } from './protocol/agent-constants';
 import { type AgentMessageKind, canonicalAgentMessage } from './protocol/agent-hmac';
 import { execPublicKeyFromVault } from './protocol/exec-sign';
 import { BUILD_VERSION } from './version';

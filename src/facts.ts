@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { redactSecrets } from '@servor/shared/utils';
+import { redactSecrets } from './protocol/redact';
 
 // Host facts: what is running on the box + its health. Two cadences keep the
 // agent light: live parts (containers, pm2, failed units) are recomputed on every

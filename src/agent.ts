@@ -1,5 +1,4 @@
 import { createHmac } from 'node:crypto';
-import { AGENT_FACTS_PUSH_DELAY_MS } from '@servor/shared/constants';
 import {
   type CheckDef,
   type CheckResult,
@@ -9,6 +8,7 @@ import {
 import { type AgentConfig, saveConfig as defaultSaveConfig } from './config';
 import { cronMatches, minuteKey, type ScheduledCommand } from './cron';
 import { collect as defaultCollect } from './metrics';
+import { AGENT_FACTS_PUSH_DELAY_MS } from './protocol/agent-constants';
 import { type AgentMessageKind, canonicalAgentMessage } from './protocol/agent-hmac';
 import { setExecPolicy as defaultSetExecPolicy, startTunnel as defaultStartTunnel } from './tunnel';
 import { stageUpdate as defaultStageUpdate } from './updater';

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { AGENT_UPDATE_PUBKEY } from '@servor/shared/constants';
+import { AGENT_UPDATE_PUBKEY } from './protocol/agent-constants';
 import { UPDATE_PUBKEY } from './pubkey';
 
 describe('update public key', () => {
