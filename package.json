@@ -24,7 +24,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/shell-quote": "^1.7.5",
-    "typescript": "^6.0.3"
+    "typescript": "7.0.2"
   },
   "dependencies": {
     "@noble/curves": "^2.4.0",
