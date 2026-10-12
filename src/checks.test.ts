@@ -150,21 +150,21 @@ describe('tcp checks', () => {
 });
 
 describe('command-running checks', () => {
-  test.each([
-    'custom_script',
-    'ssh',
-  ] as const)('a %s check refuses a blacklisted command without spawning anything', async (type) => {
-    const spawn = spyOn(Bun, 'spawn');
-    try {
-      const res = await runCheck(def(type, { command: 'rm -rf --no-preserve-root /' }));
-      expect(res.status).toBe('down');
-      expect(res.errorMessage).toMatch(/^command rejected: /);
-      expect(res.latencyMs).toBe(0);
-      expect(spawn).not.toHaveBeenCalled();
-    } finally {
-      spawn.mockRestore();
-    }
-  });
+  test.each(['custom_script', 'ssh'] as const)(
+    'a %s check refuses a blacklisted command without spawning anything',
+    async (type) => {
+      const spawn = spyOn(Bun, 'spawn');
+      try {
+        const res = await runCheck(def(type, { command: 'rm -rf --no-preserve-root /' }));
+        expect(res.status).toBe('down');
+        expect(res.errorMessage).toMatch(/^command rejected: /);
+        expect(res.latencyMs).toBe(0);
+        expect(spawn).not.toHaveBeenCalled();
+      } finally {
+        spawn.mockRestore();
+      }
+    },
+  );
 
   test.each([
     'shutdown -h now',

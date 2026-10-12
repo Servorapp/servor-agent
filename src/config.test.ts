@@ -84,16 +84,15 @@ describe('config', () => {
     expect(loadConfig().version).toBe('1');
   });
 
-  test.each([
-    'serverId',
-    'secret',
-    'apiUrl',
-  ] as const)('a config without %s refuses to load', (field) => {
-    const partial: Record<string, unknown> = { ...valid };
-    delete partial[field];
-    write(partial);
-    expect(() => loadConfig()).toThrow(/invalid config/);
-  });
+  test.each(['serverId', 'secret', 'apiUrl'] as const)(
+    'a config without %s refuses to load',
+    (field) => {
+      const partial: Record<string, unknown> = { ...valid };
+      delete partial[field];
+      write(partial);
+      expect(() => loadConfig()).toThrow(/invalid config/);
+    },
+  );
 
   test('an empty required field refuses to load', () => {
     write({ ...valid, secret: '' });
