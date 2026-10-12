@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { createHmac } from 'node:crypto';
-import { x25519 } from '@noble/curves/ed25519';
+import { x25519 } from '@noble/curves/ed25519.js';
 import { clampInterval, createAgent } from './agent';
 import type { CheckDef, CheckResult } from './checks';
 import type { AgentConfig } from './config';
@@ -63,7 +63,7 @@ const hmac = (secret: string, ts: string, kind: AgentMessageKind, payload: strin
     .digest('hex');
 
 const pubkeyB64 = () =>
-  Buffer.from(execPublicKeyFromVault(x25519.utils.randomPrivateKey())).toString('base64');
+  Buffer.from(execPublicKeyFromVault(x25519.utils.randomSecretKey())).toString('base64');
 
 type Sent = { url: string; init?: RequestInit };
 

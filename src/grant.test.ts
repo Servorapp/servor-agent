@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import { x25519 } from '@noble/curves/ed25519';
+import { x25519 } from '@noble/curves/ed25519.js';
 import { createGrantVerifier, GRANT_FUTURE_SKEW_S, GRANT_PAST_SKEW_S, NONCE_TTL_MS } from './grant';
 import { type ExecGrant, execPublicKeyFromVault, signExecGrant } from './protocol/exec-sign';
 
 const SERVER_ID = '019ecd37-5979-72ce-8960-fc9454880973';
 
-const vaultKey = () => x25519.utils.randomPrivateKey();
+const vaultKey = () => x25519.utils.randomSecretKey();
 const pubB64 = (vaultPrivkey: Uint8Array) =>
   Buffer.from(execPublicKeyFromVault(vaultPrivkey)).toString('base64');
 

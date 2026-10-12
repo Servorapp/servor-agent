@@ -6,9 +6,9 @@
 // copy drifts from the original, because a guard that disagrees with the one
 // on the control plane is worse than no guard.
 
-import { ed25519 } from '@noble/curves/ed25519';
-import { hkdf } from '@noble/hashes/hkdf';
-import { sha256 } from '@noble/hashes/sha256';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { hkdf } from '@noble/hashes/hkdf.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 import { wipe } from './wipe';
 
 // ── End-to-end exec authorization signatures ────────────────────────────────

@@ -1,11 +1,11 @@
 {
   "exec-sign.ts": {
     "source": "packages/shared/src/crypto/exec-sign.ts",
-    "sha256": "a8c546f81361c3bb953c99394cf5800efa0438229322c85aa5463bb40a23426a"
+    "sha256": "c0c34df16e7dc9c2cd33d46576355edfb29b65be6287743091887336a6f7de81"
   },
   "fs-grant.ts": {
     "source": "packages/shared/src/crypto/fs-grant.ts",
-    "sha256": "59e259a95f4bd0f5252b0d485b9546b293fde562aa32f66594da0139cb1946f2"
+    "sha256": "e2fa83b5aa5eb6b38ef75a7a1076f22d5dfe31f0c0a9086f2fe6e8dc13ad4187"
   },
   "wipe.ts": {
     "source": "packages/shared/src/crypto/wipe.ts",
@@ -29,7 +29,7 @@
   },
   "net-grant.ts": {
     "source": "packages/shared/src/crypto/net-grant.ts",
-    "sha256": "badfca22a9b96d8e59f60d396aa70925651d65aa829cac601ab828e3b16f1e96"
+    "sha256": "95c0c313455f5742b1b21a24c8d23c83bcf0644caf53073f17eb6c7c9ad162df"
   },
   "agent-constants.ts": {
     "source": "packages/shared/src/constants/agent.ts",

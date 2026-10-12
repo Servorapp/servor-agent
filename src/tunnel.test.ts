@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHmac } from 'node:crypto';
-import { x25519 } from '@noble/curves/ed25519';
+import { x25519 } from '@noble/curves/ed25519.js';
 import type { AgentConfig } from './config';
 import { canonicalAgentMessage } from './protocol/agent-hmac';
 import { type ExecGrant, execPublicKeyFromVault, signExecGrant } from './protocol/exec-sign';
@@ -135,9 +135,9 @@ const spawn = ((argv: string[]) => {
   return proc;
 }) as unknown as typeof Bun.spawn;
 
-const vaultKey = x25519.utils.randomPrivateKey();
+const vaultKey = x25519.utils.randomSecretKey();
 const PUBKEY = Buffer.from(execPublicKeyFromVault(vaultKey)).toString('base64');
-const otherKey = x25519.utils.randomPrivateKey();
+const otherKey = x25519.utils.randomSecretKey();
 
 let nonceCounter = 0;
 

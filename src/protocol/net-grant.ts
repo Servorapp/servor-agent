@@ -6,7 +6,7 @@
 // copy drifts from the original, because a guard that disagrees with the one
 // on the control plane is worse than no guard.
 
-import { sha256 } from '@noble/hashes/sha256';
+import { sha256 } from '@noble/hashes/sha2.js';
 
 // ── Canonical descriptor for a signed request to a service on the server ────
 //
