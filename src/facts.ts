@@ -87,6 +87,21 @@ type UserAccount = {
   keys: SshKey[];
 };
 type TlsCert = { domain: string; notAfter?: string; daysLeft?: number };
+type SecurityFacts = {
+  ssh?: {
+    permitRootLogin?: string;
+    passwordAuthentication?: boolean;
+    permitEmptyPasswords?: boolean;
+    maxAuthTries?: number;
+    x11Forwarding?: boolean;
+  };
+  bruteForceGuard?: 'fail2ban' | 'crowdsec' | 'none';
+  autoUpdates?: boolean;
+  sudoNopasswd?: number;
+  emptyPasswords?: number;
+  extraRootAccounts?: string[];
+  aslr?: boolean;
+};
 export type HostFacts = {
   collectedAt?: string;
   docker?: { version?: string; running?: number; total?: number };
@@ -111,6 +126,7 @@ export type HostFacts = {
     firewallRules?: string[];
     timeSync?: boolean;
   };
+  security?: SecurityFacts;
 };
 
 const parseHealth = (status: string): Container['health'] => {
@@ -770,6 +786,130 @@ const collectFirewallRules = (kind: string): string[] => {
     .map((l) => l.slice(0, 200));
 };
 
+const readText = (path: string): string | null => {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+};
+
+const yesNo = (value: string | undefined): boolean | undefined =>
+  value === 'yes' ? true : value === 'no' ? false : undefined;
+
+/**
+ * The settings the security audit needs, out of `sshd -T`.
+ *
+ * @remarks
+ * `sshd -T` prints the configuration sshd actually applies — Include files,
+ * drop-ins and compiled-in defaults resolved — which grepping sshd_config gets
+ * wrong as soon as a cloud image ships a drop-in. Older OpenSSH spells
+ * `prohibit-password` as `without-password`; both mean key-only.
+ */
+export const parseSshdConfig = (output: string): SecurityFacts['ssh'] => {
+  const settings = new Map<string, string>();
+  for (const line of output.split('\n')) {
+    const [key, ...rest] = line.trim().split(/\s+/);
+    if (key && rest.length) settings.set(key.toLowerCase(), rest.join(' ').toLowerCase());
+  }
+  if (settings.size === 0) return undefined;
+  const rootLogin = settings.get('permitrootlogin');
+  const tries = Number.parseInt(settings.get('maxauthtries') ?? '', 10);
+  return {
+    permitRootLogin: rootLogin === 'without-password' ? 'prohibit-password' : rootLogin,
+    passwordAuthentication: yesNo(settings.get('passwordauthentication')),
+    permitEmptyPasswords: yesNo(settings.get('permitemptypasswords')),
+    maxAuthTries: Number.isFinite(tries) ? tries : undefined,
+    x11Forwarding: yesNo(settings.get('x11forwarding')),
+  };
+};
+
+/** Rules that let someone become root without typing a password. */
+export const countNopasswd = (sudoers: string): number =>
+  sudoers
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#') && !l.startsWith('Defaults') && /\bNOPASSWD\s*:/.test(l))
+    .length;
+
+/**
+ * Accounts that log in with no password at all.
+ *
+ * @remarks
+ * An empty hash field, and only that. `!` and `*` are locked accounts — every
+ * system user has one — and counting them would bury the real finding.
+ */
+export const countEmptyPasswords = (shadow: string): number =>
+  shadow.split('\n').filter((l) => {
+    const [name, hash] = l.split(':');
+    return Boolean(name) && hash === '';
+  }).length;
+
+/** Accounts other than root that are root anyway: uid 0 under another name. */
+export const findExtraRootAccounts = (passwd: string): string[] =>
+  passwd
+    .split('\n')
+    .map((l) => l.split(':'))
+    .filter(([name, , uid]) => name && name !== 'root' && uid === '0')
+    .map(([name]) => name as string)
+    .slice(0, 20);
+
+const readSudoers = (): string | null => {
+  const main = readText('/etc/sudoers');
+  if (main == null) return null;
+  // sudo skips drop-ins whose name has a dot or ends in ~, so the audit does too.
+  const dropIns = sh(['ls', '-1', '/etc/sudoers.d'])
+    .split('\n')
+    .filter((f) => f && !f.includes('.') && !f.endsWith('~'))
+    .map((f) => readText(`/etc/sudoers.d/${f}`) ?? '');
+  return [main, ...dropIns].join('\n');
+};
+
+const autoUpdatesEnabled = (): boolean | undefined => {
+  if (has('apt')) {
+    const installed = sh(['dpkg-query', '-W', '-f=${Status}', 'unattended-upgrades']).includes(
+      'install ok installed',
+    );
+    return (
+      installed &&
+      /Unattended-Upgrade\s+"1"/.test(
+        sh(['apt-config', 'dump', 'APT::Periodic::Unattended-Upgrade']),
+      )
+    );
+  }
+  if (has('dnf')) {
+    return ['dnf-automatic.timer', 'dnf-automatic-install.timer', 'dnf5-automatic.timer'].some(
+      (unit) => sh(['systemctl', 'is-enabled', unit]) === 'enabled',
+    );
+  }
+  return undefined;
+};
+
+/**
+ * Inputs to the security audit that no other fact covers.
+ *
+ * @remarks
+ * Read-only, like everything here. sshd -T, /etc/shadow and the sudoers need
+ * root: without it those fields stay absent and the audit reports the checks as
+ * skipped, which is the honest answer — not a pass.
+ */
+const collectSecurity = (): SecurityFacts => {
+  const sshd = sh(['sshd', '-T']) || sh(['/usr/sbin/sshd', '-T']);
+  const sudoers = readSudoers();
+  const shadow = readText('/etc/shadow');
+  const passwd = readText('/etc/passwd');
+  const aslr = readText('/proc/sys/kernel/randomize_va_space')?.trim();
+  return {
+    ssh: sshd ? parseSshdConfig(sshd) : undefined,
+    bruteForceGuard: isActive('fail2ban') ? 'fail2ban' : isActive('crowdsec') ? 'crowdsec' : 'none',
+    autoUpdates: autoUpdatesEnabled(),
+    sudoNopasswd: sudoers == null ? undefined : countNopasswd(sudoers),
+    emptyPasswords: shadow == null ? undefined : countEmptyPasswords(shadow),
+    extraRootAccounts: passwd == null ? undefined : findExtraRootAccounts(passwd),
+    aslr: aslr ? aslr === '2' : undefined,
+  };
+};
+
 let heavyCache: Partial<HostFacts> | null = null;
 let heavyCacheAt = 0;
 const FACTS_TTL_MS = 15 * 60 * 1000;
@@ -793,6 +933,7 @@ const collectHeavy = (): Partial<HostFacts> => {
     domains,
     tls: collectTls(),
     health: collectHealth(),
+    security: collectSecurity(),
   };
 };
 

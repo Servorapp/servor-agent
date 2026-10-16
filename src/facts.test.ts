@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { heavyFactsAreStale, invalidateHeavyFacts, parseCrontab } from './facts';
+import {
+  countEmptyPasswords,
+  countNopasswd,
+  findExtraRootAccounts,
+  heavyFactsAreStale,
+  invalidateHeavyFacts,
+  parseCrontab,
+  parseSshdConfig,
+} from './facts';
 
 describe('parseCrontab', () => {
   test('reads a per-user spool, where there is no user column', () => {
@@ -99,5 +107,62 @@ describe('when the heavy pass runs again', () => {
   test('invalidating twice is safe', () => {
     invalidateHeavyFacts();
     expect(() => invalidateHeavyFacts()).not.toThrow();
+  });
+});
+
+describe('security audit inputs', () => {
+  test('reads the effective sshd settings', () => {
+    const ssh = parseSshdConfig(
+      [
+        'port 22',
+        'permitrootlogin without-password',
+        'passwordauthentication no',
+        'permitemptypasswords no',
+        'maxauthtries 6',
+        'x11forwarding yes',
+      ].join('\n'),
+    );
+    // Older OpenSSH spelling, normalised so the audit has one value to read.
+    expect(ssh).toEqual({
+      permitRootLogin: 'prohibit-password',
+      passwordAuthentication: false,
+      permitEmptyPasswords: false,
+      maxAuthTries: 6,
+      x11Forwarding: true,
+    });
+  });
+
+  test('no sshd output means no ssh facts, not defaults', () => {
+    expect(parseSshdConfig('')).toBeUndefined();
+  });
+
+  test('counts NOPASSWD rules, not comments or Defaults', () => {
+    const sudoers = [
+      '# ubuntu ALL=(ALL) NOPASSWD:ALL',
+      'Defaults env_reset',
+      '%sudo ALL=(ALL:ALL) ALL',
+      'ubuntu ALL=(ALL) NOPASSWD:ALL',
+      'deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart app',
+    ].join('\n');
+    expect(countNopasswd(sudoers)).toBe(2);
+  });
+
+  test('an empty hash is a passwordless account, a locked one is not', () => {
+    const shadow = [
+      'root:$6$abc:19000::::::',
+      'daemon:*:19000::::::',
+      'svc:!:19000::::::',
+      'guest::19000::::::',
+    ].join('\n');
+    expect(countEmptyPasswords(shadow)).toBe(1);
+  });
+
+  test('finds uid 0 under another name', () => {
+    const passwd = [
+      'root:x:0:0:root:/root:/bin/bash',
+      'toor:x:0:0::/root:/bin/sh',
+      'deploy:x:1000:1000::/home/deploy:/bin/bash',
+    ].join('\n');
+    expect(findExtraRootAccounts(passwd)).toEqual(['toor']);
   });
 });
