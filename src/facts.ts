@@ -114,6 +114,10 @@ type SecurityFacts = {
 };
 export type HostFacts = {
   collectedAt?: string;
+  /** When the slow half (security, updates, services…) was last read, and how
+   * long it is kept: together they say when the next reading will happen. */
+  heavyCollectedAt?: string;
+  heavyTtlSeconds?: number;
   docker?: { version?: string; running?: number; total?: number };
   containers?: Container[];
   pm2?: { version?: string };
@@ -1156,6 +1160,8 @@ export const getFacts = (): HostFacts => {
   const running = containers.filter((c) => c.state === 'running').length;
   return {
     collectedAt: new Date().toISOString(),
+    heavyCollectedAt: new Date(heavyCacheAt).toISOString(),
+    heavyTtlSeconds: FACTS_TTL_MS / 1000,
     ...heavyCache,
     docker:
       containers.some((c) => c.runtime === 'docker') || heavyCache.docker
