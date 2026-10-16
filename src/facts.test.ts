@@ -2,11 +2,15 @@ import { describe, expect, test } from 'bun:test';
 import {
   countEmptyPasswords,
   countNopasswd,
+  countRemoteTrust,
   findExtraRootAccounts,
   heavyFactsAreStale,
   invalidateHeavyFacts,
   parseCrontab,
+  parseDockerInspect,
+  parseRedisConf,
   parseSshdConfig,
+  parseWebServerConfig,
 } from './facts';
 
 describe('parseCrontab', () => {
@@ -164,5 +168,71 @@ describe('security audit inputs', () => {
       'deploy:x:1000:1000::/home/deploy:/bin/bash',
     ].join('\n');
     expect(findExtraRootAccounts(passwd)).toEqual(['toor']);
+  });
+});
+
+describe('specialised audit inputs', () => {
+  test('flags containers that hold the host', () => {
+    const out = parseDockerInspect(
+      [
+        '/web|false|bridge|/srv/www;',
+        '/portainer|false|bridge|/var/run/docker.sock;/data;',
+        '/netdata|true|host|/proc;',
+      ].join('\n'),
+    );
+    expect(out).toEqual({
+      privileged: ['netdata'],
+      socketMounted: ['portainer'],
+      hostNetwork: ['netdata'],
+    });
+  });
+
+  test('counts remote trust in pg_hba, not local or loopback trust', () => {
+    const hba = [
+      '# TYPE DATABASE USER ADDRESS METHOD',
+      'local all postgres peer',
+      'local all all trust',
+      'host all all 127.0.0.1/32 trust',
+      'host all all ::1/128 trust',
+      'host all all 0.0.0.0/0 trust',
+      'host all all 10.0.0.0 255.0.0.0 trust',
+      'hostssl all all 0.0.0.0/0 scram-sha-256',
+    ].join('\n');
+    expect(countRemoteTrust(hba)).toBe(2);
+  });
+
+  test('a redis password can come from requirepass or an ACL user', () => {
+    expect(parseRedisConf('# requirepass foobared\nbind 127.0.0.1').requirePass).toBe(false);
+    expect(parseRedisConf('requirepass s3cret').requirePass).toBe(true);
+    expect(parseRedisConf('user app on >s3cret ~* +@all').requirePass).toBe(true);
+  });
+
+  test('reads nginx tokens, legacy TLS and HSTS', () => {
+    const conf = [
+      'server_tokens off;',
+      'server {',
+      '  listen 443 ssl;',
+      '  ssl_protocols TLSv1.1 TLSv1.2;',
+      '  # add_header Strict-Transport-Security "max-age=63072000";',
+      '}',
+    ].join('\n');
+    expect(parseWebServerConfig('nginx', conf)).toEqual({
+      kind: 'nginx',
+      tokensHidden: true,
+      legacyTls: true,
+      tls: true,
+      hsts: false,
+    });
+    // TLSv1.2 alone is not legacy, even though it starts with "TLSv1".
+    expect(parseWebServerConfig('nginx', 'ssl_protocols TLSv1.2 TLSv1.3;').legacyTls).toBe(false);
+  });
+
+  test('reads apache ServerTokens and SSLProtocol', () => {
+    const conf = 'ServerTokens Prod\nSSLEngine on\nSSLProtocol all -SSLv3 -TLSv1 -TLSv1.1';
+    expect(parseWebServerConfig('apache', conf)).toMatchObject({
+      tokensHidden: true,
+      legacyTls: false,
+      tls: true,
+    });
   });
 });

@@ -101,6 +101,16 @@ type SecurityFacts = {
   emptyPasswords?: number;
   extraRootAccounts?: string[];
   aslr?: boolean;
+  docker?: { privileged: string[]; socketMounted: string[]; hostNetwork: string[] };
+  postgres?: { remoteTrust: number };
+  redis?: { requirePass: boolean };
+  webServer?: {
+    kind: 'nginx' | 'apache';
+    tokensHidden: boolean;
+    legacyTls: boolean;
+    tls: boolean;
+    hsts: boolean;
+  };
 };
 export type HostFacts = {
   collectedAt?: string;
@@ -886,6 +896,176 @@ const autoUpdatesEnabled = (): boolean | undefined => {
 };
 
 /**
+ * Running containers that hold the host: privileged, given the Docker socket,
+ * or sharing the host's network namespace.
+ *
+ * @remarks
+ * Fed by `docker inspect` with one line per container,
+ * `name|privileged|networkMode|mount sources;…`.
+ */
+export const parseDockerInspect = (output: string): NonNullable<SecurityFacts['docker']> => {
+  const out = {
+    privileged: [] as string[],
+    socketMounted: [] as string[],
+    hostNetwork: [] as string[],
+  };
+  for (const line of output.split('\n')) {
+    const [rawName, privileged, network, mounts] = line.trim().split('|');
+    if (!rawName) continue;
+    const name = rawName.replace(/^\//, '');
+    if (privileged === 'true') out.privileged.push(name);
+    if (network === 'host') out.hostNetwork.push(name);
+    if ((mounts ?? '').split(';').some((m) => /\/docker\.sock$/.test(m.trim()))) {
+      out.socketMounted.push(name);
+    }
+  }
+  for (const list of Object.values(out)) list.splice(20);
+  return out;
+};
+
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1/32', '::1/128', 'localhost', '127.0.0.1', '::1']);
+const PG_METHODS = new Set([
+  'trust',
+  'reject',
+  'md5',
+  'password',
+  'scram-sha-256',
+  'gss',
+  'sspi',
+  'ident',
+  'peer',
+  'pam',
+  'ldap',
+  'radius',
+  'cert',
+]);
+
+/**
+ * `host` lines of a pg_hba.conf that let a remote client in without a password.
+ *
+ * @remarks
+ * `local` (Unix socket) and loopback `trust` are a common, deliberate setup and
+ * are not counted. The method is found by name rather than by column, because
+ * an address may be written as two fields (`10.0.0.0 255.0.0.0`).
+ */
+export const countRemoteTrust = (hba: string): number =>
+  hba.split('\n').filter((raw) => {
+    const fields = raw.replace(/#.*/, '').trim().split(/\s+/);
+    if (!fields[0]?.startsWith('host')) return false;
+    const method = fields.slice(3).find((f) => PG_METHODS.has(f));
+    return method === 'trust' && !LOOPBACK_ADDRESSES.has(fields[3] ?? '');
+  }).length;
+
+/** Whether redis asks for a password: `requirepass`, or ACL users with one. */
+export const parseRedisConf = (conf: string): NonNullable<SecurityFacts['redis']> => {
+  const lines = conf
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+  const requirePass = lines.some(
+    (l) =>
+      /^requirepass\s+\S+/i.test(l) ||
+      /^aclfile\s+\S+/i.test(l) ||
+      /^user\s+\S+.*\son\s.*[>#]/i.test(l),
+  );
+  return { requirePass };
+};
+
+/** Header leaks and TLS settings of an nginx (`nginx -T`) or apache configuration. */
+export const parseWebServerConfig = (
+  kind: 'nginx' | 'apache',
+  config: string,
+): NonNullable<SecurityFacts['webServer']> => {
+  const lines = config
+    .split('\n')
+    .map((l) => l.replace(/#.*/, '').trim())
+    .filter(Boolean);
+  const valuesOf = (directive: RegExp) =>
+    lines
+      .filter((l) => directive.test(l))
+      .flatMap((l) => l.replace(/;$/, '').split(/\s+/).slice(1));
+  if (kind === 'nginx') {
+    const protocols = valuesOf(/^ssl_protocols\s/);
+    return {
+      kind,
+      tokensHidden: valuesOf(/^server_tokens\s/).includes('off'),
+      legacyTls: protocols.some((p) => ['SSLv3', 'TLSv1', 'TLSv1.1'].includes(p)),
+      tls: lines.some((l) => /^ssl_certificate\s/.test(l) || /^listen\s.*\bssl\b/.test(l)),
+      hsts: lines.some((l) => /strict-transport-security/i.test(l)),
+    };
+  }
+  const tokens = valuesOf(/^ServerTokens\s/i).map((v) => v.toLowerCase());
+  const protocols = valuesOf(/^SSLProtocol\s/i);
+  return {
+    kind,
+    tokensHidden: tokens.some((v) => v === 'prod' || v === 'productonly'),
+    legacyTls: protocols.some((p) =>
+      ['+SSLv3', '+TLSv1', '+TLSv1.1', 'SSLv3', 'TLSv1', 'TLSv1.1'].includes(p),
+    ),
+    tls: lines.some((l) => /^SSLEngine\s+on/i.test(l) || /^SSLCertificateFile\s/i.test(l)),
+    hsts: lines.some((l) => /strict-transport-security/i.test(l)),
+  };
+};
+
+const collectDockerSecurity = (): SecurityFacts['docker'] => {
+  if (!has('docker')) return undefined;
+  const ids = sh(['docker', 'ps', '-q']).split('\n').filter(Boolean).slice(0, 100);
+  if (ids.length === 0) return { privileged: [], socketMounted: [], hostNetwork: [] };
+  const output = sh([
+    'docker',
+    'inspect',
+    '--format',
+    '{{.Name}}|{{.HostConfig.Privileged}}|{{.HostConfig.NetworkMode}}|{{range .Mounts}}{{.Source}};{{end}}',
+    ...ids,
+  ]);
+  return output ? parseDockerInspect(output) : undefined;
+};
+
+const firstReadable = (paths: string[]): string | null => {
+  for (const path of paths) {
+    const text = readText(path);
+    if (text != null) return text;
+  }
+  return null;
+};
+
+const collectPostgresSecurity = (): SecurityFacts['postgres'] => {
+  if (!isRunning('postgres')) return undefined;
+  const paths = bash(
+    'ls -1 /etc/postgresql/*/main/pg_hba.conf /var/lib/pgsql/data/pg_hba.conf /var/lib/pgsql/*/data/pg_hba.conf 2>/dev/null',
+  )
+    .split('\n')
+    .filter(Boolean);
+  const hba = paths.map((p) => readText(p)).filter((t): t is string => t != null);
+  if (hba.length === 0) return undefined;
+  return { remoteTrust: hba.reduce((n, text) => n + countRemoteTrust(text), 0) };
+};
+
+const collectRedisSecurity = (): SecurityFacts['redis'] => {
+  if (!isRunning('redis-server')) return undefined;
+  const conf = firstReadable([
+    '/etc/redis/redis.conf',
+    '/etc/redis.conf',
+    '/etc/redis/default.conf',
+  ]);
+  return conf == null ? undefined : parseRedisConf(conf);
+};
+
+const collectWebServerSecurity = (): SecurityFacts['webServer'] => {
+  if (isRunning('nginx') && has('nginx')) {
+    const config = sh(['nginx', '-T'], 8000);
+    return config ? parseWebServerConfig('nginx', config) : undefined;
+  }
+  if (isRunning('apache2') || isRunning('httpd')) {
+    const config = bash(
+      'cat /etc/apache2/apache2.conf /etc/apache2/conf-enabled/*.conf /etc/apache2/sites-enabled/* /etc/httpd/conf/httpd.conf /etc/httpd/conf.d/*.conf 2>/dev/null',
+    );
+    return config ? parseWebServerConfig('apache', config) : undefined;
+  }
+  return undefined;
+};
+
+/**
  * Inputs to the security audit that no other fact covers.
  *
  * @remarks
@@ -907,6 +1087,10 @@ const collectSecurity = (): SecurityFacts => {
     emptyPasswords: shadow == null ? undefined : countEmptyPasswords(shadow),
     extraRootAccounts: passwd == null ? undefined : findExtraRootAccounts(passwd),
     aslr: aslr ? aslr === '2' : undefined,
+    docker: collectDockerSecurity(),
+    postgres: collectPostgresSecurity(),
+    redis: collectRedisSecurity(),
+    webServer: collectWebServerSecurity(),
   };
 };
 
