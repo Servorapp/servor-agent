@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHmac } from 'node:crypto';
+import { rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { x25519 } from '@noble/curves/ed25519.js';
 import type { AgentConfig } from './config';
 import { canonicalAgentMessage } from './protocol/agent-hmac';
 import { type ExecGrant, execPublicKeyFromVault, signExecGrant } from './protocol/exec-sign';
+import { describeFsReadRange } from './protocol/fs-grant';
 import { setExecPolicy, startTunnel } from './tunnel';
 
 const SERVER_ID = '019ecd37-5979-72ce-8960-fc9454880973';
@@ -965,5 +969,55 @@ describe('an outage nobody can see is the one nobody can fix', () => {
     } finally {
       errors.mockRestore();
     }
+  });
+});
+
+describe('ranged file reads', () => {
+  const rangeFrame = (
+    path: string,
+    offset: number,
+    length: number,
+    signedFor = { offset, length },
+  ) => {
+    const grant: ExecGrant = {
+      serverId: SERVER_ID,
+      kind: 'fs',
+      command: describeFsReadRange({ path, ...signedFor }),
+      nonce: `nonce-${++nonceCounter}`,
+      ts: String(Math.floor(Date.now() / 1000)),
+    };
+    return {
+      type: 'fs',
+      id: 'fs-1',
+      op: 'read-range',
+      path,
+      offset,
+      length,
+      nonce: grant.nonce,
+      ts: grant.ts,
+      sig: Buffer.from(signExecGrant(vaultKey, grant)).toString('base64'),
+    };
+  };
+
+  test('a slice signed for its exact range is read', async () => {
+    const file = join(tmpdir(), `servor-range-${Date.now()}.txt`);
+    await writeFile(file, 'abcdefghij');
+    try {
+      const { socket } = online();
+      socket().deliver(rangeFrame(file, 2, 3));
+      for (let i = 0; i < 50 && socket().of('fs.result').length === 0; i++) await tick();
+      const res = socket().of('fs.result')[0] ?? {};
+      expect(res.ok).toBe(true);
+      expect(Buffer.from(String(res.content), 'base64').toString()).toBe('cde');
+    } finally {
+      await rm(file, { force: true });
+    }
+  });
+
+  test('a signature for one range cannot read another', async () => {
+    const { socket } = online();
+    socket().deliver(rangeFrame('/etc/hostname', 4096, 3, { offset: 0, length: 3 }));
+    for (let i = 0; i < 20 && socket().of('fs.result').length === 0; i++) await tick();
+    expect(socket().of('fs.result')[0]).toMatchObject({ ok: false, code: 'denied' });
   });
 });

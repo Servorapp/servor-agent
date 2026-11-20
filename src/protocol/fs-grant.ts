@@ -197,3 +197,28 @@ export const describeFsChunk = (i: FsChunkDescriptorInput): string =>
   [`fs.${i.op}`, i.uploadId, i.path, String(i.offset), i.contentHash, String(i.totalBytes), i.mode]
     .map(field)
     .join('');
+
+// ── Ranged reads ────────────────────────────────────────────────────────────
+// A whole-file `read` travels in one tunnel frame, which caps it. Reading a big
+// file — to copy it to another server, or to download it — takes it slice by
+// slice, each slice its own signed operation naming the exact byte range, so a
+// signature for the first megabyte of a file can never be replayed to read a
+// different range or a different file.
+//
+// Its own descriptor and its own op name, like the chunked upload and for the
+// same reason: `describeFsOp` stays byte-identical, so nothing an older agent
+// already accepts changes meaning.
+
+export const FS_READ_RANGE_OP = 'read-range';
+
+export type FsReadRangeDescriptorInput = {
+  path: string;
+  /** First byte of the range. */
+  offset: number;
+  /** Bytes asked for; at most {@link FS_CHUNK_MAX_BYTES}. */
+  length: number;
+};
+
+/** The string signed as an `fs` grant's `command` for one ranged read. */
+export const describeFsReadRange = (i: FsReadRangeDescriptorInput): string =>
+  [`fs.${FS_READ_RANGE_OP}`, i.path, String(i.offset), String(i.length)].map(field).join('');

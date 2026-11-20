@@ -634,6 +634,8 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
           mode: typeof msg.mode === 'string' ? msg.mode : undefined,
           content: typeof msg.content === 'string' ? msg.content : undefined,
           recursive: msg.recursive === true,
+          offset: typeof msg.offset === 'number' ? msg.offset : undefined,
+          length: typeof msg.length === 'number' ? msg.length : undefined,
         };
         const bytes = req.op === 'write' ? Buffer.from(req.content ?? '', 'base64') : null;
         if (!grants.verify('fs', fsDescriptorFor(req, bytes), msg)) {

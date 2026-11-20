@@ -1,9 +1,22 @@
 import type { Stats } from 'node:fs';
-import { chmod, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { AgentConfig } from './config';
 import {
   describeFsOp,
+  describeFsReadRange,
+  FS_CHUNK_MAX_BYTES,
+  FS_READ_RANGE_OP,
   type FsOp,
   fsContentHash,
   isProtectedFsPath,
@@ -37,8 +50,12 @@ export const FS_MAX_BYTES = 8 * 1024 * 1024;
 export const FS_MAX_ENTRIES = 2000;
 
 export type FsRequest = {
-  op: FsOp;
+  op: FsOp | typeof FS_READ_RANGE_OP;
   path: string;
+  /** `read-range`: first byte. */
+  offset?: number;
+  /** `read-range`: bytes asked for. */
+  length?: number;
   /** `move`: destination. */
   to?: string;
   /** `chmod`: octal, e.g. `0644`. */
@@ -64,7 +81,7 @@ export type FsResponse =
       ok: true;
       entries?: FsEntry[];
       stat?: FsEntry;
-      /** base64, `read` only. */
+      /** base64, `read` and `read-range` only. */
       content?: string;
       /** Minted by `write-begin`; the id every later chunk carries. */
       uploadId?: string;
@@ -96,14 +113,16 @@ const fail = (code: FsErrorCode, error: string): FsResponse => ({ ok: false, cod
  * is what stops the relay keeping a valid signature while swapping the bytes.
  */
 export const fsDescriptorFor = (req: FsRequest, content: Uint8Array | null): string =>
-  describeFsOp({
-    op: req.op,
-    path: req.path,
-    to: req.to ?? null,
-    mode: req.mode ?? null,
-    contentHash: content ? fsContentHash(content) : null,
-    recursive: req.recursive ?? null,
-  });
+  req.op === FS_READ_RANGE_OP
+    ? describeFsReadRange({ path: req.path, offset: req.offset ?? 0, length: req.length ?? 0 })
+    : describeFsOp({
+        op: req.op,
+        path: req.path,
+        to: req.to ?? null,
+        mode: req.mode ?? null,
+        contentHash: content ? fsContentHash(content) : null,
+        recursive: req.recursive ?? null,
+      });
 
 const MODE_RE = /^[0-7]{3,4}$/;
 
@@ -182,6 +201,36 @@ export const performFsOp = async (req: FsRequest): Promise<FsResponse> => {
         }
         const buf = await readFile(req.path);
         return { ok: true, content: buf.toString('base64'), stat: describe('', s) };
+      }
+
+      case FS_READ_RANGE_OP: {
+        // One slice of a file too big for a single frame. The range is signed,
+        // so it is checked here against the file as it is now rather than
+        // clamped: a caller asking past the end gets what exists, nothing more.
+        const offset = req.offset ?? -1;
+        const length = req.length ?? 0;
+        if (!Number.isSafeInteger(offset) || offset < 0) {
+          return fail('failed', 'offset must be a non-negative integer');
+        }
+        if (!Number.isSafeInteger(length) || length < 1 || length > FS_CHUNK_MAX_BYTES) {
+          return fail('too-large', `length must be between 1 and ${FS_CHUNK_MAX_BYTES} bytes`);
+        }
+        const s = await lstat(req.path);
+        if (s.isDirectory()) return fail('is-a-directory', 'is a directory');
+        const handle = await open(req.path, 'r');
+        try {
+          const buf = Buffer.alloc(Math.max(0, Math.min(length, s.size - offset)));
+          const { bytesRead } = buf.length
+            ? await handle.read(buf, 0, buf.length, offset)
+            : { bytesRead: 0 };
+          return {
+            ok: true,
+            content: buf.subarray(0, bytesRead).toString('base64'),
+            stat: describe('', s),
+          };
+        } finally {
+          await handle.close();
+        }
       }
 
       case 'write': {

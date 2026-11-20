@@ -189,3 +189,55 @@ describe('fsDescriptorFor', () => {
     );
   });
 });
+
+describe('read-range', () => {
+  const decode = (s?: string) => Buffer.from(s ?? '', 'base64').toString('utf-8');
+
+  test('returns exactly the bytes asked for, and the file size', async () => {
+    await writeFile(p('big.txt'), '0123456789');
+    const res = await performFsOp({ op: 'read-range', path: p('big.txt'), offset: 3, length: 4 });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(decode(res.content)).toBe('3456');
+    expect(res.stat?.size).toBe(10);
+  });
+
+  test('a range past the end returns what exists, then nothing', async () => {
+    await writeFile(p('f.txt'), 'abc');
+    const tail = await performFsOp({ op: 'read-range', path: p('f.txt'), offset: 1, length: 100 });
+    expect(tail.ok && decode(tail.content)).toBe('bc');
+    const past = await performFsOp({ op: 'read-range', path: p('f.txt'), offset: 50, length: 10 });
+    expect(past.ok && past.content).toBe('');
+  });
+
+  test('refuses a directory, a negative offset and an oversized slice', async () => {
+    await writeFile(p('f.txt'), 'abc');
+    expect(await performFsOp({ op: 'read-range', path: dir, offset: 0, length: 1 })).toMatchObject({
+      ok: false,
+      code: 'is-a-directory',
+    });
+    expect(
+      await performFsOp({ op: 'read-range', path: p('f.txt'), offset: -1, length: 1 }),
+    ).toMatchObject({ ok: false });
+    expect(
+      await performFsOp({
+        op: 'read-range',
+        path: p('f.txt'),
+        offset: 0,
+        length: 4 * 1024 * 1024 + 1,
+      }),
+    ).toMatchObject({ ok: false, code: 'too-large' });
+  });
+
+  test('the signed descriptor binds the path and the exact range', () => {
+    const a = fsDescriptorFor({ op: 'read-range', path: '/srv/a', offset: 0, length: 10 }, null);
+    expect(a).not.toBe(
+      fsDescriptorFor({ op: 'read-range', path: '/srv/a', offset: 10, length: 10 }, null),
+    );
+    expect(a).not.toBe(
+      fsDescriptorFor({ op: 'read-range', path: '/srv/b', offset: 0, length: 10 }, null),
+    );
+    expect(a).not.toBe(fsDescriptorFor({ op: 'read', path: '/srv/a' }, null));
+    expect(a.startsWith('13:fs.read-range')).toBe(true);
+  });
+});
